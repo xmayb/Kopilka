@@ -1,47 +1,64 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   View, Text, TextInput, Pressable, FlatList, ScrollView,
-  StyleSheet, KeyboardAvoidingView, Platform, Alert, StatusBar,
+  StyleSheet, KeyboardAvoidingView, Platform, Alert, StatusBar, Modal,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const STORAGE_KEY = 'kopilka:v1';
+const STORAGE_KEY = 'kopilka:v2';
+// Старый формат (до появления цели накоплений) хранил один "budget".
+// Читаем его один раз, чтобы не терять данные у тех, кто уже пользовался приложением.
+const OLD_STORAGE_KEY = 'kopilka:v1';
 
+// Палитра в духе 70-х: олива + терракота, тёплая бумага вместо белого,
+// без ярко-жёлтого и золотого.
 const C = {
-  bg: '#EEF1F6',
-  card: '#FFFFFF',
-  ink: '#1C2340',
-  muted: '#7A8199',
-  line: '#E3E7EF',
-  accent: '#3B5BDB',
-  ok: '#2B8A3E',
-  warn: '#E8590C',
-  over: '#C92A2A',
+  bg: '#F3E9D2',
+  card: '#FBF3E0',
+  ink: '#332919',
+  muted: '#8C7A5B',
+  line: '#E4D7B8',
+  accent: '#B9542A',
+  heroLink: '#E08A54',
+  heroMuted: '#C9B48B',
+  heroTrack: '#4A3B24',
+  ok: '#7E9B52',
+  warn: '#C98B4A',
+  over: '#C1503A',
 };
 
 const CATEGORIES = [
-  { id: 'food', name: 'Еда', icon: '🍲', color: '#F08C00' },
-  { id: 'transport', name: 'Транспорт', icon: '🚋', color: '#1C7ED6' },
-  { id: 'home', name: 'Дом', icon: '🏠', color: '#7048E8' },
-  { id: 'health', name: 'Здоровье', icon: '💊', color: '#2B8A3E' },
-  { id: 'fun', name: 'Отдых', icon: '🎧', color: '#D6336C' },
-  { id: 'other', name: 'Другое', icon: '📦', color: '#868E96' },
+  { id: 'food', name: 'Еда', icon: '🍲', color: '#B9542A' },
+  { id: 'transport', name: 'Транспорт', icon: '🚋', color: '#3E6258' },
+  { id: 'home', name: 'Дом', icon: '🏠', color: '#6B7A3A' },
+  { id: 'health', name: 'Здоровье', icon: '💊', color: '#7A4B32' },
+  { id: 'fun', name: 'Отдых', icon: '🎧', color: '#8C3F57' },
+  { id: 'other', name: 'Другое', icon: '📦', color: '#8A7355' },
 ];
 const catById = Object.fromEntries(CATEGORIES.map((c) => [c.id, c]));
 
 const money = (n) =>
   Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ') + ' zł';
 
+// Польская клавиатура по умолчанию ставит запятую вместо точки.
+const parseNum = (text) => parseFloat(String(text ?? '').replace(',', '.'));
+
 const MONTHS = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь',
   'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
 
 export default function App() {
   const [expenses, setExpenses] = useState([]);
-  const [budget, setBudget] = useState(3000);
+  const [monthlyIncome, setMonthlyIncome] = useState(3000);
+  const [savingsGoal, setSavingsGoal] = useState(0);
   const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
   const [category, setCategory] = useState('food');
   const [loaded, setLoaded] = useState(false);
+
+  const [settingsVisible, setSettingsVisible] = useState(false);
+  const [incomeText, setIncomeText] = useState('');
+  const [savingsText, setSavingsText] = useState('');
+  const [overspendVisible, setOverspendVisible] = useState(false);
 
   // Загрузка данных с устройства
   useEffect(() => {
@@ -50,8 +67,18 @@ export default function App() {
         if (raw) {
           const data = JSON.parse(raw);
           setExpenses(data.expenses ?? []);
-          setBudget(data.budget ?? 3000);
+          setMonthlyIncome(data.monthlyIncome ?? 3000);
+          setSavingsGoal(data.savingsGoal ?? 0);
+          return null;
         }
+        // Переносим данные из старого формата (единый "budget"), если он есть.
+        return AsyncStorage.getItem(OLD_STORAGE_KEY).then((oldRaw) => {
+          if (!oldRaw) return;
+          const old = JSON.parse(oldRaw);
+          setExpenses(old.expenses ?? []);
+          setMonthlyIncome(old.budget ?? 3000);
+          setSavingsGoal(0);
+        });
       })
       .finally(() => setLoaded(true));
   }, []);
@@ -59,25 +86,26 @@ export default function App() {
   // Сохранение при каждом изменении
   useEffect(() => {
     if (!loaded) return;
-    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ expenses, budget }));
-  }, [expenses, budget, loaded]);
+    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ expenses, monthlyIncome, savingsGoal }));
+  }, [expenses, monthlyIncome, savingsGoal, loaded]);
 
   const now = new Date();
-  const thisMonth = useMemo(
-    () => expenses.filter((e) => {
-      const d = new Date(e.date);
-      return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
-    }),
-    [expenses]
-  );
+  const thisMonth = expenses.filter((e) => {
+    const d = new Date(e.date);
+    return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+  });
 
   const spent = thisMonth.reduce((s, e) => s + e.amount, 0);
-  const left = budget - spent;
-  const ratio = budget > 0 ? spent / budget : 0;
+  // Сколько можно потратить за месяц, чтобы отложенная сумма всё же накопилась.
+  const spendable = monthlyIncome - savingsGoal;
+  const left = spendable - spent;
+  const ratio = spendable > 0 ? spent / spendable : (spent > 0 ? 1 : 0);
   const barColor = ratio < 0.7 ? C.ok : ratio < 1 ? C.warn : C.over;
 
   const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
   const daysLeft = daysInMonth - now.getDate() + 1;
+  // Среднее арифметическое: сколько можно тратить в день до конца месяца,
+  // чтобы не залезть в сумму, которую хочешь отложить.
   const perDay = left > 0 ? left / daysLeft : 0;
 
   const byCategory = CATEGORIES
@@ -86,7 +114,7 @@ export default function App() {
     .sort((a, b) => b.total - a.total);
 
   const addExpense = () => {
-    const value = parseFloat(amount.replace(',', '.'));
+    const value = parseNum(amount);
     if (!value || value <= 0) {
       Alert.alert('Введите сумму', 'Сумма должна быть больше нуля.');
       return;
@@ -97,6 +125,16 @@ export default function App() {
     ]);
     setAmount('');
     setNote('');
+
+    // Проверяем темп трат: сколько должно было быть потрачено к сегодняшнему
+    // дню, если тратить равномерно весь месяц и всё-таки накопить цель.
+    if (spendable > 0) {
+      const spentAfter = spent + value;
+      const paceTarget = spendable * (now.getDate() / daysInMonth);
+      if (spentAfter > paceTarget) {
+        setOverspendVisible(true);
+      }
+    }
   };
 
   const removeExpense = (id) =>
@@ -105,30 +143,53 @@ export default function App() {
       { text: 'Удалить', style: 'destructive', onPress: () => setExpenses((p) => p.filter((e) => e.id !== id)) },
     ]);
 
-  const editBudget = () =>
-    Alert.prompt('Бюджет на месяц', 'Сумма в злотых', (text) => {
-      const v = parseFloat((text ?? '').replace(',', '.'));
-      if (v > 0) setBudget(v);
-    }, 'plain-text', String(budget), 'numeric');
+  const openSettings = () => {
+    setIncomeText(String(monthlyIncome));
+    setSavingsText(String(savingsGoal));
+    setSettingsVisible(true);
+  };
+
+  const saveSettings = () => {
+    const income = parseNum(incomeText);
+    if (!income || income <= 0) {
+      Alert.alert('Введите доход', 'Сумма дохода за месяц должна быть больше нуля.');
+      return;
+    }
+    let goal = parseNum(savingsText);
+    if (!goal || goal < 0) goal = 0;
+    if (goal > income) {
+      Alert.alert('Слишком большая цель', 'Нельзя накопить больше, чем весь доход за месяц — цель уменьшена.');
+      goal = income;
+    }
+    setMonthlyIncome(income);
+    setSavingsGoal(goal);
+    setSettingsVisible(false);
+  };
 
   const header = (
     <View>
       <Text style={s.month}>{MONTHS[now.getMonth()]} {now.getFullYear()}</Text>
       <Text style={s.title}>Копилка</Text>
+      <View style={s.rule} />
 
-      {/* Главная карточка: сколько осталось */}
+      {/* Главная карточка: сколько осталось на траты */}
       <View style={s.hero}>
-        <Text style={s.heroLabel}>{left >= 0 ? 'Осталось в этом месяце' : 'Перерасход'}</Text>
+        <Text style={s.heroLabel}>{left >= 0 ? 'Можно потратить' : 'Перерасход'}</Text>
         <Text style={[s.heroValue, left < 0 && { color: C.over }]}>{money(Math.abs(left))}</Text>
         <View style={s.track}>
           <View style={[s.fill, { width: `${Math.min(ratio, 1) * 100}%`, backgroundColor: barColor }]} />
         </View>
         <View style={s.heroRow}>
           <Text style={s.heroMeta}>Потрачено {money(spent)}</Text>
-          <Pressable onPress={editBudget} hitSlop={10}>
-            <Text style={s.link}>из {money(budget)}</Text>
+          <Pressable onPress={openSettings} hitSlop={10}>
+            <Text style={s.link}>из {money(spendable)}</Text>
           </Pressable>
         </View>
+        <Pressable onPress={openSettings} style={s.goalRow} hitSlop={6}>
+          <Text style={s.goalText}>
+            Доход {money(monthlyIncome)} · Цель накоплений {money(savingsGoal)} ✎
+          </Text>
+        </Pressable>
         {left > 0 && (
           <Text style={s.perDay}>Можно тратить {money(perDay)} в день ещё {daysLeft} дн.</Text>
         )}
@@ -222,6 +283,68 @@ export default function App() {
           );
         }}
       />
+
+      {/* Доход за месяц и цель накоплений */}
+      <Modal visible={settingsVisible} transparent animationType="fade" onRequestClose={() => setSettingsVisible(false)}>
+        <View style={s.overlay}>
+          <View style={s.modalCard}>
+            <Text style={s.modalTitle}>Настройки месяца</Text>
+
+            <Text style={s.fieldLabel}>Доход за месяц</Text>
+            <View style={s.inputRow}>
+              <TextInput
+                style={[s.input, s.modalInput]}
+                keyboardType="decimal-pad"
+                value={incomeText}
+                onChangeText={setIncomeText}
+                placeholder="0"
+                placeholderTextColor={C.muted}
+              />
+              <Text style={s.currency}>zł</Text>
+            </View>
+
+            <Text style={s.fieldLabel}>Хочу накопить</Text>
+            <View style={s.inputRow}>
+              <TextInput
+                style={[s.input, s.modalInput]}
+                keyboardType="decimal-pad"
+                value={savingsText}
+                onChangeText={setSavingsText}
+                placeholder="0"
+                placeholderTextColor={C.muted}
+              />
+              <Text style={s.currency}>zł</Text>
+            </View>
+
+            <View style={s.modalButtons}>
+              <Pressable style={s.modalCancel} onPress={() => setSettingsVisible(false)}>
+                <Text style={s.modalCancelText}>Отмена</Text>
+              </Pressable>
+              <Pressable style={s.button} onPress={saveSettings}>
+                <Text style={s.buttonText}>Сохранить</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Предупреждение: темп трат обгоняет план накоплений */}
+      <Modal visible={overspendVisible} transparent animationType="fade" onRequestClose={() => setOverspendVisible(false)}>
+        <View style={s.overlay}>
+          <View style={s.modalCard}>
+            <Text style={s.warnIcon}>📉</Text>
+            <Text style={s.modalTitle}>Не укладываешься в план</Text>
+            <Text style={s.warnText}>
+              Чтобы накопить {money(savingsGoal)} к концу месяца, нужно тратить в среднем
+              не больше {money(perDay)} в день. Сейчас трат за месяц уже больше, чем
+              планировалось на сегодня — иначе отложить нужную сумму не получится.
+            </Text>
+            <Pressable style={s.button} onPress={() => setOverspendVisible(false)}>
+              <Text style={s.buttonText}>Понятно</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -229,33 +352,42 @@ export default function App() {
 const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: C.bg },
   content: { paddingTop: 64, paddingHorizontal: 18, paddingBottom: 40 },
-  month: { color: C.muted, fontSize: 15, textTransform: 'capitalize' },
-  title: { color: C.ink, fontSize: 34, fontWeight: '800', letterSpacing: -0.5, marginBottom: 16 },
+  month: {
+    color: C.muted, fontSize: 13, textTransform: 'uppercase', letterSpacing: 1.5,
+  },
+  title: { color: C.ink, fontSize: 34, fontWeight: '800', letterSpacing: -0.5, marginTop: 2 },
+  rule: { width: 36, height: 3, backgroundColor: C.accent, borderRadius: 2, marginTop: 8, marginBottom: 16 },
 
-  hero: { backgroundColor: C.ink, borderRadius: 24, padding: 22, marginBottom: 14 },
-  heroLabel: { color: '#AEB6D0', fontSize: 15 },
-  heroValue: { color: '#FFFFFF', fontSize: 44, fontWeight: '800', letterSpacing: -1, marginVertical: 6 },
-  track: { height: 12, borderRadius: 6, backgroundColor: '#2E3760', overflow: 'hidden', marginTop: 6 },
-  fill: { height: '100%', borderRadius: 6 },
+  hero: {
+    backgroundColor: C.ink, borderRadius: 14, padding: 22, marginBottom: 14,
+    borderWidth: 1, borderColor: '#5A4A30',
+  },
+  heroLabel: { color: C.heroMuted, fontSize: 14, textTransform: 'uppercase', letterSpacing: 1 },
+  heroValue: { color: '#F6ECD6', fontSize: 44, fontWeight: '800', letterSpacing: -1, marginVertical: 6 },
+  track: { height: 12, borderRadius: 4, backgroundColor: C.heroTrack, overflow: 'hidden', marginTop: 6 },
+  fill: { height: '100%', borderRadius: 4 },
   heroRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 },
-  heroMeta: { color: '#AEB6D0', fontSize: 14 },
-  link: { color: '#8FA8FF', fontSize: 14, fontWeight: '600' },
-  perDay: { color: '#FFFFFF', fontSize: 14, marginTop: 14, opacity: 0.9 },
+  heroMeta: { color: C.heroMuted, fontSize: 14 },
+  link: { color: C.heroLink, fontSize: 14, fontWeight: '600' },
+  goalRow: { marginTop: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: '#4A3B24' },
+  goalText: { color: C.heroMuted, fontSize: 13 },
+  perDay: { color: '#F3E7CC', fontSize: 14, marginTop: 10, opacity: 0.95 },
 
-  card: { backgroundColor: C.card, borderRadius: 18, padding: 16, marginBottom: 14 },
+  card: { backgroundColor: C.card, borderRadius: 10, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: C.line },
   inputRow: { flexDirection: 'row', alignItems: 'center' },
   input: {
-    backgroundColor: C.bg, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12,
+    backgroundColor: C.bg, borderRadius: 8, paddingHorizontal: 14, paddingVertical: 12,
     fontSize: 16, color: C.ink, marginBottom: 10, flexGrow: 1,
+    borderWidth: 1, borderColor: C.line,
   },
   amountInput: { fontSize: 28, fontWeight: '700' },
   currency: { fontSize: 22, color: C.muted, marginLeft: 10, marginBottom: 10 },
   chip: {
-    borderWidth: 1, borderColor: C.line, borderRadius: 999,
+    borderWidth: 1, borderColor: C.line, borderRadius: 999, backgroundColor: C.card,
     paddingHorizontal: 14, paddingVertical: 8, marginRight: 8,
   },
   chipText: { color: C.ink, fontSize: 14, fontWeight: '600' },
-  button: { backgroundColor: C.accent, borderRadius: 14, paddingVertical: 15, alignItems: 'center' },
+  button: { backgroundColor: C.accent, borderRadius: 10, paddingVertical: 15, alignItems: 'center' },
   buttonText: { color: '#fff', fontSize: 16, fontWeight: '700' },
 
   section: { color: C.ink, fontSize: 17, fontWeight: '700', marginBottom: 12 },
@@ -267,11 +399,22 @@ const s = StyleSheet.create({
 
   item: {
     flexDirection: 'row', alignItems: 'center', backgroundColor: C.card,
-    borderRadius: 16, padding: 14, marginBottom: 8,
+    borderRadius: 10, padding: 14, marginBottom: 8, borderWidth: 1, borderColor: C.line,
   },
-  dot: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginRight: 12 },
+  dot: { width: 40, height: 40, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginRight: 12 },
   itemTitle: { color: C.ink, fontSize: 16, fontWeight: '600' },
   itemMeta: { color: C.muted, fontSize: 13, marginTop: 2 },
   itemSum: { color: C.ink, fontSize: 16, fontWeight: '700' },
   empty: { color: C.muted, textAlign: 'center', marginTop: 20 },
+
+  overlay: { flex: 1, backgroundColor: 'rgba(51,41,25,0.55)', justifyContent: 'center', padding: 24 },
+  modalCard: { backgroundColor: C.card, borderRadius: 14, padding: 22, borderWidth: 1, borderColor: C.line },
+  modalTitle: { color: C.ink, fontSize: 19, fontWeight: '800', marginBottom: 16, textAlign: 'center' },
+  fieldLabel: { color: C.muted, fontSize: 13, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 },
+  modalInput: { fontSize: 20, fontWeight: '700' },
+  modalButtons: { flexDirection: 'row', gap: 10, marginTop: 6 },
+  modalCancel: { flex: 1, paddingVertical: 15, alignItems: 'center', borderRadius: 10, borderWidth: 1, borderColor: C.line },
+  modalCancelText: { color: C.muted, fontSize: 16, fontWeight: '600' },
+  warnIcon: { fontSize: 32, textAlign: 'center', marginBottom: 4 },
+  warnText: { color: C.ink, fontSize: 15, lineHeight: 21, textAlign: 'center', marginBottom: 18 },
 });
